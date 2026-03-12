@@ -4,7 +4,7 @@
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@pons/sdk": "jsr:@pons/sdk@^0.3.0",
+    "@pons/sdk": "jsr:@pons/sdk@^0.2",
     "@clack/prompts": "npm:@clack/prompts@^0.10.1",
     "chalk": "npm:chalk@^5.6.2",
     "commander": "npm:commander@^12.1.0",
