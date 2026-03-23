@@ -9,9 +9,8 @@
  */
 
 import type { Command } from "commander";
-import { join, resolve } from "node:path";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { join, resolve, toFileUrl } from "@std/path";
+import { existsSync } from "@std/fs";
 import { getPonsHome } from "@pons/sdk";
 import type { ModuleManifest } from "@pons/sdk";
 
@@ -28,7 +27,7 @@ function readManifest(dir: string): ModuleManifest | null {
   if (!existsSync(manifestPath)) return null;
 
   try {
-    return JSON.parse(readFileSync(manifestPath, "utf-8")) as ModuleManifest;
+    return JSON.parse(Deno.readTextFileSync(manifestPath)) as ModuleManifest;
   } catch {
     return null;
   }
@@ -53,9 +52,9 @@ async function loadCliEntrypoint(
 
   try {
     // Resolve symlinks so Deno uses the correct import map context
-    const realPath = realpathSync(cliPath);
+    const realPath = Deno.realPathSync(cliPath);
     const cliModule = (await import(
-      pathToFileURL(realPath).href
+      toFileUrl(realPath).href
     )) as CliExport;
 
     if (typeof cliModule.init === "function") {
@@ -63,7 +62,7 @@ async function loadCliEntrypoint(
       return true;
     }
   } catch (error) {
-    if (process.env["DEBUG"]) {
+    if (Deno.env.get("DEBUG")) {
       console.error(
         `  Warning: Failed to load CLI from ${manifest.id}: ${
           error instanceof Error ? error.message : String(error)
@@ -86,13 +85,16 @@ async function loadCliEntrypoint(
  * If the kernel is not installed, returns silently so the CLI
  * only shows its own built-in commands.
  */
-export async function loadDynamicCommands(program: Command): Promise<void> {
+export async function loadDynamicCommands(program: Command, kernelPath?: string): Promise<void> {
   const home = getPonsHome();
-  const kernelDir = resolve(home, "kernel");
+  const kernelDir = kernelPath ? resolve(kernelPath) : resolve(home, "kernel");
 
   // ─── Kernel ──────────────────────────────────────────────────
   const kernelManifest = readManifest(kernelDir);
-  if (!kernelManifest) return; // Kernel not installed — nothing to load
+  if (!kernelManifest) {
+    console.log('\n  Kernel is not installed. Run "pons install" to get started.\n');
+    return; // Kernel not installed — nothing to load
+  }
 
   await loadCliEntrypoint(program, kernelDir, kernelManifest);
 
@@ -103,43 +105,25 @@ export async function loadDynamicCommands(program: Command): Promise<void> {
     if (!existsSync(loaderModulePath)) return;
 
     // Resolve symlinks so Deno uses the correct import map context
-    const realLoaderPath = realpathSync(loaderModulePath);
+    const realLoaderPath = Deno.realPathSync(loaderModulePath);
     const loaderModule = await import(
-      pathToFileURL(realLoaderPath).href
+      toFileUrl(realLoaderPath).href
     );
     const ModuleLoader = loaderModule.ModuleLoader;
 
-    // ModuleLoader requires a KernelLogger — use a silent stub
-    const silentLogger = {
-      trace() {},
-      debug() {},
-      info() {},
-      warn() {},
-      error() {},
-      fatal() {},
-      child() {
-        return silentLogger;
-      },
-      isLevelEnabled() {
-        return false;
-      },
-    };
-
-    const loader = new ModuleLoader(silentLogger);
     const modulesDir = resolve(home, "modules");
-    const discovered = loader.discover(modulesDir);
+    const loader = new ModuleLoader(modulesDir);
+    const discovered = loader.discover();
 
     for (const { manifest } of discovered) {
       const moduleDir = join(modulesDir, manifest.id);
       await loadCliEntrypoint(program, moduleDir, manifest);
     }
   } catch (error) {
-    if (process.env["DEBUG"]) {
       console.error(
         `  Warning: Failed to discover modules: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-    }
   }
 }

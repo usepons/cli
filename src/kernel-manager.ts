@@ -10,15 +10,8 @@
  *   - <version>/<path> → individual file content
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { execSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join } from "@std/path";
+import { existsSync } from "@std/fs";
 import ora from "ora";
 import chalk from "chalk";
 import * as clack from "@clack/prompts";
@@ -47,6 +40,17 @@ interface JsrPackageMeta {
 interface JsrVersionMeta {
   manifest: Record<string, { size: number; checksum: string }>;
   exports: Record<string, string>;
+}
+
+// ─── Helpers ────────────────────────────────────────────────
+
+/** Remove a path recursively, ignoring NotFound errors (like rm -rf). */
+function forceRemoveSync(path: string): void {
+  try {
+    Deno.removeSync(path, { recursive: true });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
 }
 
 // ─── JSR Helpers ────────────────────────────────────────────
@@ -113,10 +117,10 @@ async function downloadPackageFiles(
     const dir = dirname(localPath);
 
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      Deno.mkdirSync(dir, { recursive: true });
     }
 
-    writeFileSync(localPath, content, "utf-8");
+    Deno.writeTextFileSync(localPath, content);
     downloaded++;
     onProgress?.(downloaded, filePaths.length);
   }
@@ -129,14 +133,14 @@ function readKernelManifest(kernelDir: string): ModuleManifest | null {
   if (!existsSync(manifestPath)) return null;
 
   try {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as ModuleManifest;
+    const manifest = JSON.parse(Deno.readTextFileSync(manifestPath)) as ModuleManifest;
 
     // Resolve version from deno.json
     if (!manifest.version) {
       const denoJsonPath = join(kernelDir, "deno.json");
       if (existsSync(denoJsonPath)) {
         try {
-          const denoJson = JSON.parse(readFileSync(denoJsonPath, "utf-8"));
+          const denoJson = JSON.parse(Deno.readTextFileSync(denoJsonPath));
           if (denoJson.version) manifest.version = denoJson.version;
         } catch { /* ignore */ }
       }
@@ -146,6 +150,63 @@ function readKernelManifest(kernelDir: string): ModuleManifest | null {
   } catch {
     return null;
   }
+}
+
+// ─── Install (Local) ─────────────────────────────────────────
+
+/**
+ * Install a local kernel directory by symlinking it to ~/.pons/kernel/.
+ */
+export async function installKernelLocal(localPath: string, force?: boolean): Promise<boolean> {
+  const { resolve } = await import("@std/path");
+  const ponsHome = getPonsHome();
+  const kernelDir = join(ponsHome, KERNEL_DIR_NAME);
+  const resolvedPath = resolve(localPath);
+
+  // Verify the local path has a valid kernel
+  const manifestPath = join(resolvedPath, MANIFEST_FILE);
+  if (!existsSync(manifestPath)) {
+    console.error(chalk.red(`  No module.json found at ${resolvedPath}`));
+    console.error(chalk.dim("  Make sure the path points to a kernel directory."));
+    return false;
+  }
+
+  const manifest = readKernelManifest(resolvedPath);
+  if (!manifest) {
+    console.error(chalk.red(`  Invalid module.json at ${resolvedPath}`));
+    return false;
+  }
+
+  // Check existing
+  if (existsSync(kernelDir)) {
+    if (!force) {
+      const existing = readKernelManifest(kernelDir);
+      const reinstall = await clack.confirm({
+        message: `Kernel ${existing ? `v${existing.version}` : ''} is already installed. Replace with local v${manifest.version}?`,
+        initialValue: true,
+      });
+      if (clack.isCancel(reinstall) || !reinstall) {
+        console.log(chalk.dim("  Keeping existing kernel."));
+        return false;
+      }
+    }
+    forceRemoveSync(kernelDir);
+  }
+
+  if (!existsSync(ponsHome)) {
+    Deno.mkdirSync(ponsHome, { recursive: true });
+  }
+
+  // Create symlink
+  Deno.symlinkSync(resolvedPath, kernelDir);
+
+  console.log(
+    chalk.green(`  Kernel v${manifest.version} linked from ${chalk.dim(resolvedPath)}`),
+  );
+  console.log(chalk.dim(`  → ${kernelDir}`));
+  console.log();
+
+  return true;
 }
 
 // ─── Install ────────────────────────────────────────────────
@@ -171,11 +232,11 @@ export async function installKernel(home?: string, force?: boolean): Promise<boo
       }
     }
     // Remove existing kernel before reinstall
-    rmSync(kernelDir, { recursive: true, force: true });
+    forceRemoveSync(kernelDir);
   }
 
   if (!existsSync(ponsHome)) {
-    mkdirSync(ponsHome, { recursive: true });
+    Deno.mkdirSync(ponsHome, { recursive: true });
   }
 
   const spinner = ora("Resolving latest kernel version...").start();
@@ -189,10 +250,8 @@ export async function installKernel(home?: string, force?: boolean): Promise<boo
 
     spinner.text = `Downloading kernel v${version} (${fileCount} files)...`;
 
-    if (existsSync(kernelDir)) {
-      rmSync(kernelDir, { recursive: true, force: true });
-    }
-    mkdirSync(kernelDir, { recursive: true });
+    forceRemoveSync(kernelDir);
+    Deno.mkdirSync(kernelDir, { recursive: true });
 
     await downloadPackageFiles(version, versionMeta, kernelDir, (current, total) => {
       spinner.text = `Downloading kernel v${version} (${current}/${total} files)...`;
@@ -221,9 +280,7 @@ export async function installKernel(home?: string, force?: boolean): Promise<boo
     );
     console.error(chalk.dim("  Check your network connection and try again."));
 
-    if (existsSync(kernelDir)) {
-      rmSync(kernelDir, { recursive: true, force: true });
-    }
+    forceRemoveSync(kernelDir);
     return false;
   }
 }
@@ -259,8 +316,8 @@ export async function updateKernel(home?: string, json?: boolean): Promise<boole
       const updated = latestVersion !== currentManifest.version;
       if (updated) {
         const versionMeta = await fetchVersionManifest(latestVersion);
-        rmSync(kernelDir, { recursive: true, force: true });
-        mkdirSync(kernelDir, { recursive: true });
+        forceRemoveSync(kernelDir);
+        Deno.mkdirSync(kernelDir, { recursive: true });
         await downloadPackageFiles(latestVersion, versionMeta, kernelDir);
       }
       console.log(JSON.stringify({
@@ -286,8 +343,8 @@ export async function updateKernel(home?: string, json?: boolean): Promise<boole
     spinner.text = `Downloading kernel v${latestVersion} (${fileCount} files)...`;
 
     // Replace kernel directory
-    rmSync(kernelDir, { recursive: true, force: true });
-    mkdirSync(kernelDir, { recursive: true });
+    forceRemoveSync(kernelDir);
+    Deno.mkdirSync(kernelDir, { recursive: true });
 
     await downloadPackageFiles(latestVersion, versionMeta, kernelDir, (current, total) => {
       spinner.text = `Downloading kernel v${latestVersion} (${current}/${total} files)...`;
@@ -351,9 +408,11 @@ export async function updateCli(json?: boolean): Promise<boolean> {
       spinner.stop();
       const updated = latestVersion !== currentVersion;
       if (updated) {
-        execSync(`deno install -g -A --force -n pons jsr:@pons/cli@${latestVersion}`, {
-          stdio: "pipe",
-        });
+        new Deno.Command("deno", {
+          args: ["install", "-g", "-A", "--force", "-n", "pons", `jsr:@pons/cli@${latestVersion}`],
+          stdout: "null",
+          stderr: "null",
+        }).outputSync();
       }
       console.log(JSON.stringify({
         component: "cli",
@@ -373,9 +432,11 @@ export async function updateCli(json?: boolean): Promise<boolean> {
 
     spinner.text = `Updating CLI: v${currentVersion} → v${latestVersion}...`;
 
-    execSync(`deno install -g -A --force -n pons jsr:@pons/cli@${latestVersion}`, {
-      stdio: "pipe",
-    });
+    new Deno.Command("deno", {
+      args: ["install", "-g", "-A", "--force", "-n", "pons", `jsr:@pons/cli@${latestVersion}`],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
 
     spinner.succeed(
       `CLI updated: v${currentVersion} → ${chalk.green(`v${latestVersion}`)}`,
@@ -396,6 +457,75 @@ export async function updateCli(json?: boolean): Promise<boolean> {
 // ─── Delete ─────────────────────────────────────────────────
 
 /**
+ * Stop the kernel daemon if it's running.
+ * Reads the PID from ~/.pons/.runtime/kernel.pid and sends SIGTERM,
+ * waiting up to 5 seconds for graceful shutdown, then SIGKILL if needed.
+ */
+async function stopKernelDaemon(ponsHome: string): Promise<void> {
+  const pidFilePath = join(ponsHome, ".runtime", "kernel.pid");
+
+  if (!existsSync(pidFilePath)) {
+    return; // PID file doesn't exist, daemon not running
+  }
+
+  try {
+    const pidContent = Deno.readTextFileSync(pidFilePath);
+    const pid = parseInt(pidContent.trim(), 10);
+
+    if (isNaN(pid)) {
+      return; // Invalid PID, skip
+    }
+
+    // Try to send SIGTERM for graceful shutdown
+    try {
+      Deno.kill(pid, "SIGTERM");
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) {
+        // Process doesn't exist, remove the PID file
+        forceRemoveSync(pidFilePath);
+        return;
+      }
+      throw e;
+    }
+
+    // Poll for up to 5 seconds to see if process exits gracefully
+    const startTime = Date.now();
+    const timeout = 5000; // 5 seconds
+    let exited = false;
+
+    while (Date.now() - startTime < timeout) {
+      try {
+        Deno.kill(pid, 0); // Signal 0 checks if process exists
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) {
+          exited = true;
+          break;
+        }
+        throw e;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100)); // Sleep 100ms
+    }
+
+    // If still running, force kill
+    if (!exited) {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) {
+          throw e;
+        }
+      }
+    }
+
+    // Remove the PID file
+    forceRemoveSync(pidFilePath);
+  } catch (error) {
+    // If we can't read or process the PID file, just continue
+    // The kernel dir removal might fail anyway if the process is holding locks
+  }
+}
+
+/**
  * Delete the Pons kernel and optionally all Pons data.
  */
 export async function deleteKernel(home?: string): Promise<boolean> {
@@ -407,12 +537,13 @@ export async function deleteKernel(home?: string): Promise<boolean> {
     return false;
   }
 
-  // TODO: Stop daemon if running
+  // Stop daemon if running
+  await stopKernelDaemon(ponsHome);
 
   const spinner = ora("Removing kernel...").start();
 
   try {
-    rmSync(kernelDir, { recursive: true, force: true });
+    Deno.removeSync(kernelDir, { recursive: true });
     spinner.succeed(`Kernel removed from ${chalk.dim(kernelDir)}`);
   } catch (error) {
     spinner.fail("Failed to remove kernel");
@@ -439,7 +570,7 @@ export async function deleteKernel(home?: string): Promise<boolean> {
   ).start();
 
   try {
-    rmSync(ponsHome, { recursive: true, force: true });
+    Deno.removeSync(ponsHome, { recursive: true });
     cleanupSpinner.succeed(
       `All Pons data removed from ${chalk.dim(ponsHome)}`,
     );

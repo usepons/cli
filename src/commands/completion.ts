@@ -6,9 +6,11 @@
  */
 
 import type { Command } from "commander";
-import { existsSync, readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join } from "@std/path";
+import { existsSync } from "@std/fs";
 import chalk from "chalk";
+
+const encoder = new TextEncoder();
 
 // ─── Generators ──────────────────────────────────────────────
 
@@ -159,17 +161,16 @@ export function registerCompletionCommand(program: Command): void {
     .action((shell: string) => {
       switch (shell) {
         case "bash":
-          process.stdout.write(generateBash(program));
+          Deno.stdout.writeSync(encoder.encode(generateBash(program)));
           break;
         case "zsh":
-          process.stdout.write(generateZsh(program));
+          Deno.stdout.writeSync(encoder.encode(generateZsh(program)));
           break;
         case "fish":
-          process.stdout.write(generateFish(program));
+          Deno.stdout.writeSync(encoder.encode(generateFish(program)));
           break;
         default:
           console.error(`Unknown shell: ${shell}. Supported: bash, zsh, fish`);
-          process.exitCode = 1;
       }
     });
 }
@@ -210,7 +211,7 @@ export function setupCompletions(): boolean {
 }
 
 function detectShell(): string | null {
-  const shell = process.env["SHELL"] || "";
+  const shell = Deno.env.get("SHELL") || "";
   if (shell.includes("zsh")) return "zsh";
   if (shell.includes("bash")) return "bash";
   if (shell.includes("fish")) return "fish";
@@ -218,19 +219,19 @@ function detectShell(): string | null {
 }
 
 function homeDir(): string {
-  return process.env["HOME"] || process.env["USERPROFILE"] || "~";
+  return Deno.env.get("HOME") || Deno.env.get("USERPROFILE") || "~";
 }
 
 function installToRcFile(rcPath: string, evalLine: string, shellName: string): boolean {
   // Check if already installed
   if (existsSync(rcPath)) {
-    const content = readFileSync(rcPath, "utf-8");
+    const content = Deno.readTextFileSync(rcPath);
     if (content.includes(COMPLETION_MARKER)) {
       return true; // already set up
     }
   }
 
-  appendFileSync(rcPath, `\n${evalLine}\n`, "utf-8");
+  Deno.writeTextFileSync(rcPath, `\n${evalLine}\n`, { append: true });
   console.log(chalk.green(`  Shell completions added to ${chalk.dim(rcPath)}`));
   console.log(chalk.dim(`  Restart your ${shellName} session or run: source ${rcPath}`));
   return true;
@@ -241,7 +242,7 @@ function installFishCompletion(): boolean {
   const completionFile = join(completionsDir, "pons.fish");
 
   if (existsSync(completionFile)) {
-    const content = readFileSync(completionFile, "utf-8");
+    const content = Deno.readTextFileSync(completionFile);
     if (content.includes("Pons CLI fish completion")) {
       return true; // already set up
     }
@@ -249,13 +250,12 @@ function installFishCompletion(): boolean {
 
   // For fish we write a stub that calls `pons completion fish` at load time
   if (!existsSync(completionsDir)) {
-    mkdirSync(completionsDir, { recursive: true });
+    Deno.mkdirSync(completionsDir, { recursive: true });
   }
 
-  writeFileSync(
+  Deno.writeTextFileSync(
     completionFile,
     `# pons shell completion — auto-generated\npons completion fish | source\n`,
-    "utf-8",
   );
   console.log(chalk.green(`  Fish completions written to ${chalk.dim(completionFile)}`));
   return true;

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S deno run --allow-all
 
 /**
  * Pons CLI — Lightweight command loader for the Pons gateway.
@@ -15,9 +15,11 @@ import { toErrorMessage } from "@pons/sdk";
 
 import { registerOnboardCommand } from "./commands/onboard.ts";
 import { registerCompletionCommand } from "./commands/completion.ts";
-import { installKernel, updateKernel, updateCli, deleteKernel } from "./kernel-manager.ts";
+import { installKernel, installKernelLocal, updateKernel, updateCli, deleteKernel } from "./kernel-manager.ts";
 import { loadDynamicCommands } from "./loader.ts";
 import { CLI_VERSION } from "./version.ts";
+
+let exitCode = 0;
 
 const program = new Command();
 
@@ -26,6 +28,7 @@ program
   .description("Pons CLI — modular AI gateway")
   .version(CLI_VERSION)
   .option("--json", "Output results as JSON")
+  .option("--kernel-path <path>", "Use a local kernel directory (dev)")
   .configureHelp({
     sortSubcommands: true,
     sortOptions: true,
@@ -37,10 +40,13 @@ program
   .command("install")
   .description("Install the Pons kernel to ~/.pons/")
   .option("--force", "Reinstall even if kernel is already installed")
-  .addHelpText("after", "\nExamples:\n  $ pons install\n  $ pons install --force")
+  .option("--local <path>", "Symlink a local kernel directory instead of downloading from JSR")
+  .addHelpText("after", "\nExamples:\n  $ pons install\n  $ pons install --force\n  $ pons install --local ./kernel")
   .action(async (opts) => {
-    const success = await installKernel(undefined, opts.force);
-    if (!success) process.exitCode = 1;
+    const success = opts.local
+      ? await installKernelLocal(opts.local, opts.force)
+      : await installKernel(undefined, opts.force);
+    if (!success) exitCode = 1;
   });
 
 program
@@ -51,7 +57,7 @@ program
     const json = program.opts().json;
     const cliOk = await updateCli(json);
     const kernelOk = await updateKernel(undefined, json);
-    if (!cliOk || !kernelOk) process.exitCode = 1;
+    if (!cliOk || !kernelOk) exitCode = 1;
   });
 
 program
@@ -67,13 +73,17 @@ registerCompletionCommand(program);
 
 // ─── Dynamic commands from kernel + modules ─────────────────
 
-loadDynamicCommands(program).then(() => {
-  return program.parseAsync(process.argv);
+// Pre-parse to extract --kernel-path before Commander runs
+const kernelPathIdx = Deno.args.indexOf("--kernel-path");
+const kernelPath = kernelPathIdx !== -1 ? Deno.args[kernelPathIdx + 1] : undefined;
+
+loadDynamicCommands(program, kernelPath).then(() => {
+  return program.parseAsync(Deno.args, { from: "user" });
 }).then(() => {
-  // Force exit after command completes — Node.js fetch (undici) keeps
-  // connections alive in the global pool, preventing clean shutdown.
-  process.exit(process.exitCode ?? 0);
+  // Force exit after command completes — fetch keeps connections alive
+  // in the global pool, preventing clean shutdown.
+  Deno.exit(exitCode);
 }).catch((error: unknown) => {
   console.error(`Error: ${toErrorMessage(error)}`);
-  process.exit(1);
+  Deno.exit(1);
 });
