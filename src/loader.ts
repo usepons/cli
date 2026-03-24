@@ -38,11 +38,8 @@ function readManifest(dir: string): ModuleManifest | null {
  * The entrypoint module must export an `init(program: Command)` function.
  * Returns true if the entrypoint was loaded successfully.
  */
-async function loadCliEntrypoint(
-  program: Command,
-  dir: string,
-  manifest: ModuleManifest,
-): Promise<boolean> {
+async function loadCliEntrypoint(program: Command, dir: string, manifest: ModuleManifest,): Promise<boolean> {
+
   if (!manifest.cli) return false;
 
   const entrypoint = manifest.cli.entrypoint || "cli.ts";
@@ -56,6 +53,7 @@ async function loadCliEntrypoint(
     const cliModule = (await import(
       toFileUrl(realPath).href
     )) as CliExport;
+
 
     if (typeof cliModule.init === "function") {
       await cliModule.init(program);
